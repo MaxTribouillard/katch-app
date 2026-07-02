@@ -1,0 +1,97 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Rôles ──────────────────────────────────────────────────────────────────
+enum Role {
+  ADMIN
+  SALON
+  USER
+}
+
+// ── Utilisateurs ───────────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  nom          String
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Lien vers le salon géré — uniquement pour role == SALON
+  salonId      String?  @unique @map("salon_id")
+  salon        Salon?   @relation(fields: [salonId], references: [id], onDelete: SetNull)
+
+  @@map("users")
+}
+
+// ── Salons ─────────────────────────────────────────────────────────────────
+model Salon {
+  id          String       @id @default(uuid())
+  nom         String
+  nomGerant   String       @map("nom_gerant")
+  tel         String
+  mail        String
+  adresse     String?
+  latitude    Float?
+  longitude   Float?
+  planityUrl  String?      @unique @map("planity_url") // URL Planity — identifiant scraper (@unique autorise plusieurs NULL en PG)
+
+  // Compte gérant (relation inverse de User.salonId)
+  gerant      User?
+
+  // Relations
+  prestations Prestation[]
+  creneaux    Creneau[]
+}
+
+model Prestation {
+  id        String   @id @default(uuid())
+  nom       String   // Le nom EXACT affiché sur Planity (ex: "Coupe Homme 25€" ou "Men Cut")
+  prix      Float    // Stocké en nombre (ex: 25.0) plutôt qu'en texte pour tes futurs filtres
+  duree     Int      // Stocké en minutes (ex: 30)
+  
+  // La clé étrangère qui lie la prestation à SON salon unique
+  salonId   String
+  salon     Salon    @relation(fields: [salonId], references: [id], onDelete: Cascade)
+  
+  // Relation avec les créneaux qui ont réservé cette prestation spécifique
+  creneaux  Creneau[] 
+}
+
+// ── Paramètres globaux de l'application (singleton) ───────────────────────
+// Une seule ligne, identifiée par id = "singleton"
+model AppSettings {
+  id               String   @id @default("singleton")
+  // Réductions automatiques par urgence (abonnement Basic)
+  reductionSameDay Int      @default(50) // Créneaux du jour même    → -50%
+  reductionNextDay Int      @default(35) // Créneaux du lendemain    → -35%
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+model Creneau {
+  id           String      @id @default(uuid())
+  dateHeure    DateTime    // Date et heure exacte du créneau bradé
+  reduction    Int         @default(35) // Pourcentage de réduction (ex: 35 pour -35%)
+  disponible   Boolean     @default(true)
+
+  salonId      String
+  salon        Salon       @relation(fields: [salonId], references: [id], onDelete: Cascade)
+
+  // Optionnel : prestation associée au créneau
+  prestationId String?
+  prestation   Prestation? @relation(fields: [prestationId], references: [id])
+
+  // Contrainte d'unicité : le scraper ne peut pas insérer deux créneaux identiques
+  @@unique([salonId, dateHeure])
+}
