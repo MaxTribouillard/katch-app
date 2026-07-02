@@ -1,6 +1,7 @@
 import type { GetServerSideProps } from "next";
 import Head from "next/head";
 import { prisma } from "@/lib/prisma";
+import { computeDisplayReduction } from "@/lib/reduction";
 import AppHeader from "@/components/app/AppHeader";
 import FilterBar from "@/components/app/FilterBar";
 import SlotList from "@/components/app/SlotList";
@@ -15,27 +16,31 @@ interface MapPageProps {
 
 export const getServerSideProps: GetServerSideProps<MapPageProps> = async () => {
   const now = new Date();
-  const endOfDay = new Date();
-  endOfDay.setHours(23, 59, 59, 999);
+  // Fenêtre identique à la logique métier du scraper : 48h
+  const horizon = new Date(now.getTime() + 48 * 60 * 60 * 1000);
 
-  const creneaux = await prisma.creneau.findMany({
-    where: {
-      disponible: true,
-      dateHeure: { gte: now, lte: endOfDay },
-    },
-    include: {
-      salon: true,
-      prestation: true,
-    },
-    orderBy: { dateHeure: "asc" },
-  });
+  const [creneaux, appSettings] = await Promise.all([
+    prisma.creneau.findMany({
+      where: {
+        disponible: true,
+        dateHeure: { gte: now, lte: horizon },
+      },
+      include: { salon: true, prestation: true },
+      orderBy: { dateHeure: "asc" },
+    }),
+    prisma.appSettings.upsert({
+      where:  { id: "singleton" },
+      update: {},
+      create: { id: "singleton", reductionSameDay: 50, reductionNextDay: 35 },
+    }),
+  ]);
 
   const slots: CreneauSlot[] = creneaux.map((c) => ({
-    id: c.id,
+    id:        c.id,
     dateHeure: c.dateHeure.toISOString(),
-    reduction: c.reduction,
-    salonId: c.salonId,
-    salonNom: c.salon.nom,
+    reduction: computeDisplayReduction(c.dateHeure, appSettings, c.reduction),
+    salonId:   c.salonId,
+    salonNom:  c.salon.nom,
     prestation: c.prestation
       ? {
           nom: c.prestation.nom,

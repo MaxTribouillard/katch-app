@@ -6,8 +6,9 @@
  *
  * Body :
  * {
- *   "planityUrl": "https://www.planity.com/...",
- *   "scrapedSlots": [
+ *   "planityUrl":    "https://www.planity.com/...",
+ *   "nomPrestation": "Coupe homme",
+ *   "scrapedSlots":  [
  *     { "time": "2026-07-02T10:30:00.000Z", "discount": 35 },
  *     ...
  *   ]
@@ -17,12 +18,14 @@
  *   - Créneau du jour même → reductionSameDay
  *   - Créneau du lendemain → reductionNextDay
  *   - Au-delà → discount du scraper (ou 25% par défaut)
+ *
+ * Chaque créneau est lié à la prestation via prestationId.
  */
 import type { NextApiRequest, NextApiResponse } from "next";
 import { prisma } from "@/lib/prisma";
 
 // ── Constantes métier ───────────────────────────────────────────────────────
-const HORIZON_HOURS  = 36;  // Fenêtre de visibilité : 36h max
+const HORIZON_HOURS  = 48;  // Fenêtre de visibilité : 48h max
 const MAX_SLOTS      = 3;   // Maximum de "bons plans" affichés par salon
 const DEFAULT_REDUCTION = 25; // Fallback si AppSettings absent
 
@@ -56,18 +59,20 @@ interface ScrapedSlot {
 }
 
 interface ScrapeBody {
-  planityUrl:   string;
-  scrapedSlots: ScrapedSlot[];
+  planityUrl:    string;
+  nomPrestation: string;
+  scrapedSlots:  ScrapedSlot[];
 }
 
 interface ScrapeResponse {
-  success:      boolean;
-  salon?:       string;
-  received?:    number;
-  afterFilter?: number;
-  upserted?:    number;
-  deletedPast?: number;
-  error?:       string;
+  success:       boolean;
+  salon?:        string;
+  prestation?:   string;
+  received?:     number;
+  afterFilter?:  number;
+  upserted?:     number;
+  deletedPast?:  number;
+  error?:        string;
 }
 
 // ── Handler ────────────────────────────────────────────────────────────────
@@ -90,10 +95,13 @@ export default async function handler(
   }
 
   // ── Validation body ─────────────────────────────────────────────────
-  const { planityUrl, scrapedSlots } = req.body as Partial<ScrapeBody>;
+  const { planityUrl, nomPrestation, scrapedSlots } = req.body as Partial<ScrapeBody>;
 
   if (!planityUrl || typeof planityUrl !== "string") {
     return res.status(400).json({ success: false, error: "planityUrl (string) requis." });
+  }
+  if (!nomPrestation || typeof nomPrestation !== "string" || !nomPrestation.trim()) {
+    return res.status(400).json({ success: false, error: "nomPrestation (string non vide) requis." });
   }
   if (!Array.isArray(scrapedSlots)) {
     return res.status(400).json({ success: false, error: "scrapedSlots (array) requis." });
@@ -112,7 +120,23 @@ export default async function handler(
     });
   }
 
-  // ── 2. Lire les paramètres de réduction (admin) ─────────────────────
+  // ── 2. Trouver la prestation (insensible à la casse) ─────────────────
+  const prestation = await prisma.prestation.findFirst({
+    where: {
+      salonId: salon.id,
+      nom: { equals: nomPrestation.trim(), mode: "insensitive" },
+    },
+    select: { id: true, nom: true },
+  });
+
+  if (!prestation) {
+    return res.status(404).json({
+      success: false,
+      error: `La prestation "${nomPrestation}" n'existe pas pour ce salon. Ajoutez-la depuis le dashboard salon avant de scraper.`,
+    });
+  }
+
+  // ── 3. Lire les paramètres de réduction (admin) ─────────────────────
   const appSettings = await prisma.appSettings.upsert({
     where:  { id: "singleton" },
     update: {},
@@ -121,12 +145,12 @@ export default async function handler(
 
   const now = new Date();
 
-  // ── 3. Supprimer les créneaux passés ────────────────────────────────
+  // ── 4. Supprimer les créneaux passés ────────────────────────────────
   const { count: deletedPast } = await prisma.creneau.deleteMany({
     where: { salonId: salon.id, dateHeure: { lt: now } },
   });
 
-  // ── 4. Filtrer les slots (logique métier Katch) ──────────────────────
+  // ── 5. Filtrer les slots (logique métier Katch) ──────────────────────
   //   • Uniquement les 36 prochaines heures
   //   • Triés chronologiquement
   //   • Maximum 3 créneaux (les plus urgents)
@@ -141,7 +165,7 @@ export default async function handler(
     .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime())
     .slice(0, MAX_SLOTS);
 
-  // ── 5. Upsert avec réduction calculée selon la tranche ──────────────
+  // ── 6. Upsert avec réduction calculée et liaison prestation ──────────
   //   Clé unique : (salonId, dateHeure) — définie par @@unique dans le schéma
   let upserted = 0;
 
@@ -156,8 +180,8 @@ export default async function handler(
 
     await prisma.creneau.upsert({
       where:  { salonId_dateHeure: { salonId: salon.id, dateHeure } },
-      update: { reduction, disponible: true },
-      create: { salonId: salon.id, dateHeure, reduction, disponible: true },
+      update: { reduction, disponible: true,  prestationId: prestation.id },
+      create: { salonId: salon.id, dateHeure, reduction, disponible: true, prestationId: prestation.id },
     });
 
     upserted++;
@@ -166,6 +190,7 @@ export default async function handler(
   return res.status(200).json({
     success:     true,
     salon:       salon.nom,
+    prestation:  prestation.nom,
     received:    scrapedSlots.length,
     afterFilter: filteredSlots.length,
     upserted,

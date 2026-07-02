@@ -1,49 +1,56 @@
 /**
- * Géocodage d'adresse via Nominatim (OpenStreetMap) — gratuit, sans API key.
- * Respecte les conditions d'usage Nominatim : 1 requête/seconde max, User-Agent requis.
- * https://nominatim.org/release-docs/develop/api/Search/
+ * Géocodage d'adresse via l'API Adresse officielle du gouvernement français.
+ * Gratuit, sans clé API, optimisé pour les adresses françaises.
+ * https://adresse.data.gouv.fr/api-doc/adresse
+ *
+ * ⚠️  L'API renvoie les coordonnées dans l'ordre GeoJSON standard :
+ *     geometry.coordinates = [longitude, latitude]  ← ordre inversé !
  */
 
-interface NominatimResult {
-  lat: string;
-  lon: string;
-  display_name: string;
+interface GouvFeature {
+  geometry: {
+    coordinates: [number, number]; // [longitude, latitude]
+  };
+  properties: {
+    label:       string;
+    score:       number;
+    city?:       string;
+    postcode?:   string;
+  };
+}
+
+interface GouvApiResponse {
+  features: GouvFeature[];
 }
 
 /**
  * Convertit une adresse textuelle en coordonnées GPS.
  * Retourne null si l'adresse est introuvable ou si la requête échoue.
+ *
+ * @param adresse - Adresse complète (ex: "10 rue de la Paix, 75001 Paris")
  */
 export async function geocodeAddress(
   adresse: string
 ): Promise<{ lat: number; lng: number } | null> {
-  if (!adresse.trim()) return null;
+  const trimmed = adresse.trim();
+  if (!trimmed) return null;
 
-  const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("q",      adresse);
-  url.searchParams.set("format", "json");
-  url.searchParams.set("limit",  "1");
-  url.searchParams.set("countrycodes", "fr"); // Restreindre à la France
+  const url = `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(trimmed)}&limit=1`;
 
   try {
-    const res = await fetch(url.toString(), {
-      headers: {
-        // Nominatim exige un User-Agent identifiable (politique d'usage)
-        "User-Agent": "Katch-SaaS/1.0 (contact@katch.fr)",
-      },
-    });
-
+    const res = await fetch(url);
     if (!res.ok) return null;
 
-    const data = (await res.json()) as NominatimResult[];
-    if (!data.length) return null;
+    const data = (await res.json()) as GouvApiResponse;
 
-    return {
-      lat: parseFloat(data[0].lat),
-      lng: parseFloat(data[0].lon),
-    };
+    if (!data.features?.length) return null;
+
+    const [longitude, latitude] = data.features[0].geometry.coordinates;
+
+    if (isNaN(latitude) || isNaN(longitude)) return null;
+
+    return { lat: latitude, lng: longitude };
   } catch {
-    // Silently fail — les coordonnées resteront null
     return null;
   }
 }

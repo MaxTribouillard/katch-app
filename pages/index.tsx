@@ -12,6 +12,7 @@ import {
   Scissor01Icon,
 } from "@hugeicons/core-free-icons";
 import { prisma } from "@/lib/prisma";
+import { computeDisplayReduction } from "@/lib/reduction";
 import HomeHeader from "@/components/app/HomeHeader";
 import DealCard from "@/components/app/DealCard";
 import type { CreneauSlot } from "@/types/slot";
@@ -23,28 +24,38 @@ interface HomeProps {
 
 export const getServerSideProps: GetServerSideProps<HomeProps> = async () => {
   const now = new Date();
+  // Fenêtre identique à la logique métier du scraper : 48h
+  const horizon = new Date(now.getTime() + 48 * 60 * 60 * 1000);
 
-  const creneaux = await prisma.creneau.findMany({
-    where: { disponible: true, dateHeure: { gte: now } },
-    include: { salon: true, prestation: true },
-    orderBy: { dateHeure: "asc" },
-    take: 9,
-  });
+  // Récupérer créneaux + paramètres de réduction en parallèle
+  const [creneaux, appSettings, totalCount] = await Promise.all([
+    prisma.creneau.findMany({
+      where: { disponible: true, dateHeure: { gte: now, lte: horizon } },
+      include: { salon: true, prestation: true },
+      orderBy: { dateHeure: "asc" },
+      take: 9,
+    }),
+    prisma.appSettings.upsert({
+      where:  { id: "singleton" },
+      update: {},
+      create: { id: "singleton", reductionSameDay: 50, reductionNextDay: 35 },
+    }),
+    prisma.creneau.count({
+      where: { disponible: true, dateHeure: { gte: now, lte: horizon } },
+    }),
+  ]);
 
   const deals: CreneauSlot[] = creneaux.map((c) => ({
-    id: c.id,
+    id:        c.id,
     dateHeure: c.dateHeure.toISOString(),
-    reduction: c.reduction,
-    salonId: c.salonId,
-    salonNom: c.salon.nom,
+    // Réduction calculée dynamiquement selon AppSettings (source de vérité admin)
+    reduction: computeDisplayReduction(c.dateHeure, appSettings, c.reduction),
+    salonId:   c.salonId,
+    salonNom:  c.salon.nom,
     prestation: c.prestation
       ? { nom: c.prestation.nom, prix: c.prestation.prix, duree: c.prestation.duree }
       : null,
   }));
-
-  const totalCount = await prisma.creneau.count({
-    where: { disponible: true, dateHeure: { gte: now } },
-  });
 
   return { props: { deals, totalCount } };
 };
